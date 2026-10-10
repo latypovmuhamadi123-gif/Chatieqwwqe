@@ -112,6 +112,17 @@ dialog h2{margin:0 0 6px}
 }
 @media(prefers-reduced-motion:no-preference){.w{animation:in .15s ease-out}@keyframes in{from{opacity:0;transform:translateY(4px)}}}
 #toast{position:fixed;left:50%;bottom:24px;transform:translate(-50%,20px);background:var(--panel);color:var(--text);border:1px solid var(--accent);border-radius:10px;padding:10px 16px;opacity:0;pointer-events:none;transition:.2s;z-index:50;max-width:90vw}#toast.show{opacity:1;transform:translate(-50%,0)}
+.vm{display:flex;align-items:center;gap:10px;min-width:210px}
+.vm button{width:34px;height:34px;border-radius:50%;border:0;background:var(--accent);color:var(--ink);flex:none}
+.vp{flex:1;height:5px;border-radius:3px;background:color-mix(in srgb,var(--text) 22%,transparent);overflow:hidden}
+.vp i{display:block;height:100%;width:0;background:var(--accent)}
+.vt{font-size:.8em;color:var(--mute);min-width:34px;text-align:right}
+#rec{flex:1;display:flex;align-items:center;gap:12px;padding:0 6px}
+form.send.recording>:not(#rec){display:none!important}
+.rdot{width:10px;height:10px;border-radius:50%;background:#ff5d5d}
+#recT{flex:1;font-variant-numeric:tabular-nums}
+.more{align-self:center;margin:4px 0 8px}
+@media(prefers-reduced-motion:no-preference){.rdot{animation:bl 1s infinite}@keyframes bl{50%{opacity:.25}}}
 </style>
 </head>
 <body>
@@ -147,8 +158,10 @@ dialog h2{margin:0 0 6px}
       <button class="ic" id="emoBtn" type="button" aria-label="Эмодзи">😊</button>
       <button class="ic" id="imgBtn" type="button" aria-label="Фото">📎</button>
       <input id="file" type="file" accept="image/*" class="hidden">
+      <button class="ic" id="micBtn" type="button" aria-label="Голосовое сообщение">🎤</button>
       <textarea id="txt" rows="1" placeholder="Напишите сообщение"></textarea>
       <button class="go" type="submit">Отправить</button>
+      <div id="rec" class="hidden"><span class="rdot"></span><span id="recT">0:00</span><button class="ghost" id="recX" type="button">Отмена</button><button class="go" id="recOk" type="button">Отправить</button></div>
     </form>
   </main>
 </section>
@@ -196,8 +209,9 @@ applyUI();
 
 /* ---- состояние ---- */
 let me=null,meName='',U={},chats={},cur='general',curMsgs=[],replyTo=null,editing=null,mode='login',pendingName=null;
-let unsubs=[],unsubMsgs=null,unsubPeer=null,hb=null,uf=null;
-const ts=x=>x?.toMillis?x.toMillis():(x||0);
+let isAdm=false,muteUntil=0,SAN={},histLimit=100,unsubs=[],unsubMsgs=null,unsubPeer=null,hb=null,uf=null;
+const ts=x=>x?.toMillis?x.toMillis():(x instanceof Date?x.getTime():(x||0));
+const ADMIN='developermuha';
 const nameOf=k=>U[k]?.name||'…';
 const colorOf=k=>U[k]?.color||COLS[[...(k||'a')].reduce((a,c)=>a+c.charCodeAt(0),0)%COLS.length];
 const isOn=k=>Date.now()-ts(U[k]?.seen)<150000;
@@ -238,6 +252,9 @@ onAuthStateChanged(auth,async u=>{
 async function start(u){
   stop();
   me=u.uid;
+  isAdm=(u.email||'').split('@')[0].toLowerCase()===ADMIN;
+  let sd=null;try{sd=await getDoc(doc(db,'sanctions',me))}catch(e){}
+  if(sd&&sd.exists()&&sd.data().banned){await signOut(auth);$('err').textContent='Ваш аккаунт заблокирован администратором';return}
   const ref=doc(db,'users',me);let s=await getDoc(ref);
   if(!s.exists()){
     const name=pendingName||u.email.split('@')[0];pendingName=null;
@@ -255,22 +272,27 @@ async function start(u){
   unsubs.push(onSnapshot(doc(db,'chats','general'),snap=>{if(snap.exists()){const d=snap.data({serverTimestamps:'estimate'});const f=first1;first1=false;const old=chats.general;chats.general=d;if(!f&&d.last&&d.last.from!==me&&(cur!=='general'||document.hidden)&&ui.sound&&ts(d.last.t)!==ts(old?.last?.t))beep()}renderList()}));
   unsubs.push(onSnapshot(query(collection(db,'chats'),where('members','array-contains',me)),snap=>{const f=first2;first2=false;onCh(snap,f);renderList()},e=>toast('Нет доступа к чатам: проверьте правила Firestore')));
   openChat('general');
+  unsubs.push(onSnapshot(doc(db,'sanctions',me),sn=>{
+    const d=sn.exists()?sn.data({serverTimestamps:'estimate'}):{};
+    if(d.banned){signOut(auth).then(()=>{$('err').textContent='Ваш аккаунт заблокирован администратором'});return}
+    muteUntil=ts(d.mutedUntil);applyMute();
+  },()=>{}));
   const beat=()=>{if(me&&!document.hidden)updateDoc(doc(db,'users',me),{seen:serverTimestamp()}).catch(()=>{})};
-  beat();hb=setInterval(()=>{beat();renderHead();renderList()},60000);
+  beat();hb=setInterval(()=>{beat();renderHead();renderList();applyMute()},60000);
   uf=setInterval(()=>{if(!document.hidden)fetchUsers().then(renderList)},180000);
 }
 function stop(){
   unsubs.forEach(f=>f());unsubs=[];unsubMsgs&&unsubMsgs();unsubPeer&&unsubPeer();unsubMsgs=unsubPeer=null;
-  clearInterval(hb);clearInterval(uf);me=null;U={};chats={};curMsgs=[];
+  clearInterval(hb);clearInterval(uf);me=null;muteUntil=0;isAdm=false;SAN={};U={};chats={};curMsgs=[];
   $('app').classList.add('hidden');$('auth').classList.remove('hidden');$('p').value='';$('p2').value='';
 }
 async function fetchUsers(){try{const s=await getDocs(collection(db,'users'));U={};s.forEach(d=>U[d.id]=d.data({serverTimestamps:'estimate'}))}catch(e){toast('Не удалось загрузить пользователей: проверьте правила Firestore')}}
 
 /* ---- чаты ---- */
 function openChat(c){
-  cur=c;replyTo=editing=null;$('txt').value='';curMsgs=[];
+  stopRec(true);stopPlayer();histLimit=100;cur=c;replyTo=editing=null;$('txt').value='';curMsgs=[];
   unsubMsgs&&unsubMsgs();unsubPeer&&unsubPeer();unsubPeer=null;
-  unsubMsgs=onSnapshot(query(collection(db,'chats',cid(c),'messages'),orderBy('t','desc'),limit(100)),snap=>{
+  unsubMsgs=onSnapshot(query(collection(db,'chats',cid(c),'messages'),orderBy('t','desc'),limit(histLimit)),snap=>{
     curMsgs=snap.docs.map(d=>({id:d.id,...d.data({serverTimestamps:'estimate'})})).reverse();
     markRead(c);renderChat();renderList();
   },e=>toast('Нет доступа к сообщениям: проверьте правила Firestore'));
@@ -284,7 +306,7 @@ function renderList(){
   const others=Object.keys(U).filter(k=>k!==me&&nameOf(k).toLowerCase().includes(q));
   const dm=k=>chats['dm_'+[me,k].sort().join('_')];
   others.sort((a,b)=>ts(dm(b)?.last?.t)-ts(dm(a)?.last?.t)||nameOf(a).localeCompare(nameOf(b)));
-  const items=[{id:'general',name:'Общий чат',c:chats.general},...others.map(k=>({id:k,name:nameOf(k),c:dm(k)}))];
+  const items=[{id:'general',name:'Общий чат',c:chats.general},...others.map(k=>({id:k,name:dn(k),c:dm(k)}))];
   const L=$('list');L.innerHTML='';
   items.forEach(it=>{
     if(it.id==='general'&&q&&!'общий чат'.includes(q))return;
@@ -304,7 +326,7 @@ function renderList(){
 function renderHead(){
   if(!me)return;const h=$('hAva');
   if(cur==='general'){h.textContent='#';h.style.background='#7cb7ff';h.classList.remove('on');$('hName').textContent='Общий чат';$('hSub').textContent=Object.keys(U).length+' участн.'}
-  else{ava(h,cur,isOn(cur));$('hName').textContent=nameOf(cur);const sn=ts(U[cur]?.seen);$('hSub').textContent=isOn(cur)?'в сети':(U[cur]?.bio||(sn?'был(а) в '+fmtT(sn):'не в сети'))}
+  else{ava(h,cur,isOn(cur));$('hName').textContent=dn(cur);const sn=ts(U[cur]?.seen);$('hSub').textContent=isOn(cur)?'в сети':(U[cur]?.bio||(sn?'был(а) в '+fmtT(sn):'не в сети'))}
 }
 function linkify(el,text){text.split(/(https?:\/\/[^\s]+)/g).forEach((p,i)=>{if(i%2){const a=document.createElement('a');a.href=p;a.target='_blank';a.rel='noopener noreferrer';a.textContent=p;a.onclick=e=>e.stopPropagation();el.appendChild(a)}else if(p)el.appendChild(document.createTextNode(p))})}
 const REACT=['👍','❤️','😂','🔥','😮'];
@@ -312,6 +334,7 @@ function renderChat(){
   const box=$('msgs'),list=curMsgs,stick=box.scrollHeight-box.scrollTop-box.clientHeight<120;
   box.innerHTML='';
   if(!list.length)box.innerHTML='<div class="empty">Сообщений пока нет.<br>Напишите первое.</div>';
+  if(list.length>=histLimit){const mb=document.createElement('button');mb.className='ghost more';mb.type='button';mb.textContent='Показать более ранние';mb.onclick=()=>{histLimit+=100;resubMsgs()};box.appendChild(mb)}
   let pd='';
   list.forEach(m=>{
     const t=ts(m.t)||Date.now();
@@ -322,12 +345,14 @@ function renderChat(){
     REACT.forEach(r=>mk(r,()=>react(m.id,r)));
     mk('↩',()=>{replyTo=m.id;editing=null;showBar()});
     if(mine&&m.text)mk('✎',()=>{editing=m.id;replyTo=null;$('txt').value=m.text;showBar();$('txt').focus()});
-    if(mine)mk('🗑',()=>deleteDoc(doc(db,'chats',cid(cur),'messages',m.id)).catch(()=>toast('Не удалось удалить')));
+    if(mine||isAdm)mk('🗑',()=>delMsg(m));
+    if(isAdm&&!mine)mk('🛡',()=>openMod(m.from));
     w.appendChild(tl);
     const b=document.createElement('div');b.className='m';
     b.onclick=()=>{const s=w.classList.contains('sel');document.querySelectorAll('.w.sel').forEach(x=>x.classList.remove('sel'));if(!s)w.classList.add('sel')};
-    if(cur==='general'&&!mine){const s=document.createElement('span');s.className='who';s.textContent=U[m.from]?.name||m.fromName||'?';s.style.color=colorOf(m.from);b.appendChild(s)}
-    if(m.replyTo){const o=list.find(x=>x.id===m.replyTo),r=document.createElement('div');r.className='rp';r.textContent=o?(o.fromName||nameOf(o.from))+': '+(o.img?'Фото':o.text):'Сообщение удалено';b.appendChild(r)}
+    if(cur==='general'&&!mine){const s=document.createElement('span');s.className='who';s.textContent=(U[m.from]?.name||m.fromName||'?')+(isCreator(m.from)?' 👑':'');s.style.color=colorOf(m.from);b.appendChild(s)}
+    if(m.replyTo){const o=list.find(x=>x.id===m.replyTo),r=document.createElement('div');r.className='rp';r.textContent=o?(o.fromName||nameOf(o.from))+': '+(o.voice?'🎤 Голосовое':o.img?'Фото':o.text):'Сообщение удалено';b.appendChild(r)}
+    if(m.voice){const v=document.createElement('div');v.className='vm';v.dataset.vid=m.voice.id;v.dataset.dur=m.voice.dur;v.innerHTML='<button type="button" aria-label="Воспроизвести">▶</button><div class="vp"><i></i></div><span class="vt"></span>';v.querySelector('button').onclick=e=>{e.stopPropagation();toggleVoice(m.voice.id)};b.appendChild(v)}
     if(m.img){const i=document.createElement('img');i.src=m.img;i.alt='Фото';b.appendChild(i)}
     if(m.text)linkify(b,m.text);
     const tm=document.createElement('time');tm.textContent=(m.edited?'изм. ':'')+fmtT(t);b.appendChild(tm);
@@ -337,6 +362,7 @@ function renderChat(){
     box.appendChild(w);
   });
   if(stick)box.scrollTop=box.scrollHeight;
+  paintVoice();
 }
 async function react(id,e){
   const m=curMsgs.find(x=>x.id===id),has=(m?.rx?.[e]||[]).includes(me);
@@ -345,7 +371,7 @@ async function react(id,e){
 function showBar(){
   const b=$('bar');
   if(editing){b.classList.remove('hidden');$('barT').textContent='Редактирование сообщения'}
-  else if(replyTo){const o=curMsgs.find(x=>x.id===replyTo);if(!o){replyTo=null;b.classList.add('hidden');return}b.classList.remove('hidden');$('barT').textContent='Ответ для '+(o.fromName||nameOf(o.from))+': '+(o.img?'Фото':o.text)}
+  else if(replyTo){const o=curMsgs.find(x=>x.id===replyTo);if(!o){replyTo=null;b.classList.add('hidden');return}b.classList.remove('hidden');$('barT').textContent='Ответ для '+(o.fromName||nameOf(o.from))+': '+(o.voice?'🎤 Голосовое':o.img?'Фото':o.text)}
   else b.classList.add('hidden');
 }
 $('barX').onclick=()=>{replyTo=editing=null;$('txt').value='';showBar()};
@@ -354,6 +380,7 @@ $('barX').onclick=()=>{replyTo=editing=null;$('txt').value='';showBar()};
 async function send(img){
   const text=$('txt').value.trim();
   if(!me||(!text&&!img))return;
+  if(muteUntil>Date.now())return toast('Вам запрещено писать');
   const chat=cid(cur),rep=replyTo,ed=editing;
   replyTo=editing=null;$('txt').value='';autoH();showBar();
   try{
@@ -393,7 +420,13 @@ function drawSettings(){
   const C=$('cols');C.innerHTML='';COLS.forEach(c=>{const b=document.createElement('button');b.type='button';b.className='sw'+(colorOf(me)===c?' on':'');b.style.background=c;b.setAttribute('aria-label','Цвет '+c);b.onclick=()=>{U[me].color=c;updateDoc(doc(db,'users',me),{color:c}).catch(()=>{});drawSettings();renderList();renderHead();renderChat();ava($('meAva'),me)};C.appendChild(b)});
   $('size').value=ui.size;$('sizeV').textContent=ui.size;$('snd').checked=ui.sound;$('bio').value=U[me]?.bio||'';
 }
-function openSettings(){drawSettings();$('dlg').showModal()}
+function openSettings(){
+  drawSettings();
+  let a=$('modBtn');
+  if(!a){a=document.createElement('button');a.id='modBtn';a.type='button';a.className='ghost';a.style.cssText='margin-top:14px;margin-right:8px';a.textContent='🛡 Модерация';a.onclick=()=>{$('dlg').close();openMod()};$('dlg').insertBefore(a,$('close'))}
+  a.classList.toggle('hidden',!isAdm);
+  $('dlg').showModal();
+}
 $('setBtn').onclick=openSettings;$('meAva').onclick=openSettings;
 $('size').oninput=e=>{ui.size=+e.target.value;save('msg_ui',ui);applyUI();$('sizeV').textContent=ui.size};
 $('snd').onchange=e=>{ui.sound=e.target.checked;save('msg_ui',ui)};
@@ -402,7 +435,152 @@ $('close').onclick=()=>$('dlg').close();
 (()=>{const l=document.createElement('button');l.className='ghost';l.type='button';l.textContent='Выйти из аккаунта';l.style.marginTop='14px';l.onclick=()=>{$('dlg').close();signOut(auth)};$('dlg').insertBefore(l,$('close'))})();
 function beep(){try{const a=new (window.AudioContext||window.webkitAudioContext)(),o=a.createOscillator(),g=a.createGain();o.frequency.value=880;g.gain.value=.08;o.connect(g);g.connect(a.destination);o.start();o.stop(a.currentTime+.12)}catch(e){}}
 
+
+/* ---- голосовые сообщения ---- */
+const MAXREC=120;
+let mr=null,chunks=[],recT=0,recTimer=null,recStream=null,recCancel=false,pl={id:null,a:null};
+const vcache={};
+const fmtD=s=>Math.floor(s/60)+':'+String(Math.floor(s%60)).padStart(2,'0');
+function resubMsgs(){
+  unsubMsgs&&unsubMsgs();const c=cur;
+  unsubMsgs=onSnapshot(query(collection(db,'chats',cid(c),'messages'),orderBy('t','desc'),limit(histLimit)),snap=>{
+    curMsgs=snap.docs.map(d=>({id:d.id,...d.data({serverTimestamps:'estimate'})})).reverse();
+    markRead(c);renderChat();renderList();
+  },e=>toast('Нет доступа к сообщениям: проверьте правила Firestore'));
+}
+function delMsg(m){
+  const b=writeBatch(db);
+  b.delete(doc(db,'chats',cid(cur),'messages',m.id));
+  if(m.voice)b.delete(doc(db,'chats',cid(cur),'media',m.voice.id));
+  b.commit().catch(()=>toast('Не удалось удалить'));
+}
+async function startRec(){
+  if(mr)return;
+  if(muteUntil>Date.now())return toast('Вам запрещено писать');
+  if(!navigator.mediaDevices||!window.MediaRecorder)return toast('Этот браузер не поддерживает запись голоса');
+  try{recStream=await navigator.mediaDevices.getUserMedia({audio:true})}
+  catch(e){return toast('Нет доступа к микрофону. Разрешите его в настройках сайта')}
+  const mt=['audio/webm;codecs=opus','audio/mp4','audio/webm','audio/ogg;codecs=opus'].find(t=>MediaRecorder.isTypeSupported(t))||'';
+  try{mr=new MediaRecorder(recStream,Object.assign({audioBitsPerSecond:24000},mt?{mimeType:mt}:{}))}
+  catch(e){mr=new MediaRecorder(recStream)}
+  chunks=[];recCancel=false;
+  mr.ondataavailable=e=>{if(e.data.size)chunks.push(e.data)};
+  mr.onstop=finishRec;
+  mr.start();recT=Date.now();
+  $('send').classList.add('recording');$('rec').classList.remove('hidden');
+  tickRec();recTimer=setInterval(tickRec,250);
+}
+function tickRec(){const s=(Date.now()-recT)/1000;$('recT').textContent=fmtD(s);if(s>=MAXREC)stopRec(false)}
+function stopRec(cancel){if(!mr||mr.state==='inactive')return;recCancel=cancel;mr.stop()}
+async function finishRec(){
+  clearInterval(recTimer);recStream&&recStream.getTracks().forEach(t=>t.stop());
+  $('send').classList.remove('recording');$('rec').classList.add('hidden');
+  const dur=Math.round((Date.now()-recT)/1000),type=(mr&&mr.mimeType)||'audio/webm',cancel=recCancel;
+  mr=null;
+  if(cancel)return;
+  if(dur<1)return toast('Слишком короткая запись');
+  const data=await new Promise(r=>{const f=new FileReader();f.onload=()=>r(f.result);f.readAsDataURL(new Blob(chunks,{type}))});
+  if(data.length>900000)return toast('Запись слишком большая — запишите короче');
+  sendVoice(data,Math.min(dur,MAXREC));
+}
+async function sendVoice(data,dur){
+  if(!me)return;
+  if(muteUntil>Date.now())return toast('Вам запрещено писать');
+  const chat=cid(cur),rep=replyTo;replyTo=null;showBar();
+  try{
+    const b=writeBatch(db),mref=doc(collection(db,'chats',chat,'messages')),dref=doc(collection(db,'chats',chat,'media'));
+    const last={text:'🎤 Голосовое сообщение',from:me,t:serverTimestamp()};
+    b.set(dref,{from:me,data,t:serverTimestamp()});
+    b.set(mref,{from:me,fromName:meName,text:'',voice:{id:dref.id,dur},replyTo:rep||null,t:serverTimestamp(),rx:{}});
+    b.set(doc(db,'chats',chat),cur==='general'?{last}:{last,members:[me,cur]},{merge:true});
+    await b.commit();
+  }catch(e){toast('Голосовое не отправлено: '+(e.code||e.message)+(e.code==='permission-denied'?' (обновите правила Firestore)':''))}
+}
+async function getVoice(id){
+  if(vcache[id])return vcache[id];
+  const s=await getDoc(doc(db,'chats',cid(cur),'media',id));
+  if(!s.exists())throw new Error('gone');
+  return vcache[id]=s.data().data;
+}
+async function toggleVoice(id){
+  if(pl.id===id&&pl.a){pl.a.paused?pl.a.play():pl.a.pause();return}
+  stopPlayer();
+  try{
+    const a=new Audio(await getVoice(id));pl={id,a};
+    a.ontimeupdate=a.onplay=a.onpause=()=>paintVoice();
+    a.onended=()=>{pl={id:null,a:null};paintVoice()};
+    await a.play();
+  }catch(e){pl={id:null,a:null};toast('Не удалось воспроизвести голосовое');paintVoice()}
+}
+function stopPlayer(){if(pl.a)pl.a.pause();pl={id:null,a:null};paintVoice()}
+function paintVoice(){
+  document.querySelectorAll('.vm').forEach(v=>{
+    const on=pl.a&&pl.id===v.dataset.vid,dur=+v.dataset.dur||1;
+    v.querySelector('button').textContent=on&&!pl.a.paused?'⏸':'▶';
+    v.querySelector('i').style.width=on?Math.min(100,pl.a.currentTime/dur*100)+'%':'0%';
+    v.querySelector('.vt').textContent=fmtD(on?pl.a.currentTime:dur);
+  });
+}
+$('micBtn').onclick=startRec;
+$('recX').onclick=()=>stopRec(true);
+$('recOk').onclick=()=>stopRec(false);
+
+/* ---- создатель и модерация ---- */
+function isCreator(k){return nameOf(k).toLowerCase()===ADMIN}
+function dn(k){return nameOf(k)+(isCreator(k)?' 👑':'')}
+const whenFmt=m=>new Date(m).toLocaleString('ru',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'});
+function applyMute(){
+  const m=muteUntil>Date.now();
+  ['txt','micBtn','imgBtn','emoBtn'].forEach(i=>{$(i).disabled=m});
+  $('send').querySelector('.go').disabled=m;
+  $('txt').placeholder=m?(muteUntil>4e12?'Вам запрещено писать':'Вам запрещено писать до '+whenFmt(muteUntil)):'Напишите сообщение';
+}
+function sanText(s){
+  const m=ts(s.mutedUntil),p=[];
+  if(s.banned)p.push('⛔ заблокирован');
+  if(m>Date.now())p.push(m>4e12?'🔇 мут навсегда':'🔇 мут до '+whenFmt(m));
+  return p.join(' · ')||'активен';
+}
+function ensureMod(){
+  if($('mod'))return;
+  const d=document.createElement('dialog');d.id='mod';
+  d.innerHTML='<h2>Модерация</h2><p class="sub" style="margin:0 0 10px">Бан, мут и удаление чужих сообщений доступны только создателю.</p><input id="modS" type="text" placeholder="Найти пользователя"><div id="modL" style="margin-top:10px;max-height:50vh;overflow:auto"></div><button class="btn" id="modX" type="button">Закрыть</button>';
+  document.body.appendChild(d);
+  $('modX').onclick=()=>d.close();$('modS').oninput=drawMod;
+}
+async function openMod(uid){
+  if(!isAdm)return;
+  ensureMod();
+  try{const sn=await getDocs(collection(db,'sanctions'));SAN={};sn.forEach(x=>SAN[x.id]=x.data({serverTimestamps:'estimate'}))}
+  catch(e){toast('Не удалось загрузить список. Проверьте правила Firestore')}
+  await fetchUsers();
+  $('modS').value=uid?nameOf(uid):'';drawMod();
+  if(!$('mod').open)$('mod').showModal();
+}
+async function setSan(k,patch){
+  try{
+    await setDoc(doc(db,'sanctions',k),Object.assign({name:nameOf(k),by:me,t:serverTimestamp()},patch),{merge:true});
+    SAN[k]=Object.assign({},SAN[k]||{},patch);drawMod();toast('Готово');
+  }catch(e){toast('Не удалось: '+(e.code||e.message))}
+}
+function drawMod(){
+  const q=$('modS').value.trim().toLowerCase(),L=$('modL');L.innerHTML='';
+  const ids=Object.keys(U).filter(k=>k!==me&&nameOf(k).toLowerCase().includes(q)).sort((a,b)=>nameOf(a).localeCompare(nameOf(b)));
+  if(!ids.length)L.innerHTML='<div class="sub">Никого не найдено</div>';
+  ids.forEach(k=>{
+    const s=SAN[k]||{},mu=ts(s.mutedUntil)>Date.now(),row=document.createElement('div');
+    row.style.cssText='display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px 0;border-bottom:1px solid var(--line)';
+    row.innerHTML='<div class="ava"></div><div style="flex:1;min-width:120px"><b class="n"></b><div class="l"></div></div><select aria-label="Срок мута" style="width:auto;padding:6px"><option value="900000">15 мин</option><option value="3600000">1 час</option><option value="86400000">1 день</option><option value="perm">навсегда</option></select><button class="ghost mu" type="button"></button><button class="ghost bn" type="button"></button>';
+    ava(row.querySelector('.ava'),k);
+    row.querySelector('.n').textContent=dn(k);row.querySelector('.l').textContent=sanText(s);
+    const sel=row.querySelector('select'),mb=row.querySelector('.mu'),bb=row.querySelector('.bn');
+    sel.classList.toggle('hidden',mu);
+    mb.textContent=mu?'Размутить':'Замутить';bb.textContent=s.banned?'Разбанить':'Забанить';
+    mb.onclick=()=>setSan(k,{mutedUntil:mu?null:new Date(sel.value==='perm'?'2100-01-01':Date.now()+Number(sel.value))});
+    bb.onclick=()=>{if(s.banned||confirm('Забанить '+nameOf(k)+'?'))setSan(k,{banned:!s.banned})};
+    L.appendChild(row);
+  });
+}
 </script>
 </body>
 </html>
-
