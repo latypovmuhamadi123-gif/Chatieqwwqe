@@ -123,6 +123,7 @@ form.send.recording>:not(#rec){display:none!important}
 #recT{flex:1;font-variant-numeric:tabular-nums}
 .more{align-self:center;margin:4px 0 8px}
 @media(prefers-reduced-motion:no-preference){.rdot{animation:bl 1s infinite}@keyframes bl{50%{opacity:.25}}}
+mark{background:color-mix(in srgb,var(--accent) 45%,transparent);color:inherit;border-radius:3px;padding:0 1px}
 </style>
 </head>
 <body>
@@ -252,7 +253,7 @@ onAuthStateChanged(auth,async u=>{
 async function start(u){
   stop();
   me=u.uid;
-  isAdm=(u.email||'').split('@')[0].toLowerCase()===ADMIN;
+  isAdm=(u.email||'').split('@')[0].toLowerCase()===ADMIN;adminUI();
   let sd=null;try{sd=await getDoc(doc(db,'sanctions',me))}catch(e){}
   if(sd&&sd.exists()&&sd.data().banned){await signOut(auth);$('err').textContent='Ваш аккаунт заблокирован администратором';return}
   const ref=doc(db,'users',me);let s=await getDoc(ref);
@@ -283,7 +284,7 @@ async function start(u){
 }
 function stop(){
   unsubs.forEach(f=>f());unsubs=[];unsubMsgs&&unsubMsgs();unsubPeer&&unsubPeer();unsubMsgs=unsubPeer=null;
-  clearInterval(hb);clearInterval(uf);me=null;muteUntil=0;isAdm=false;SAN={};U={};chats={};curMsgs=[];
+  clearInterval(hb);clearInterval(uf);me=null;muteUntil=0;isAdm=false;SAN={};adminUI();U={};chats={};curMsgs=[];
   $('app').classList.add('hidden');$('auth').classList.remove('hidden');$('p').value='';$('p2').value='';
 }
 async function fetchUsers(){try{const s=await getDocs(collection(db,'users'));U={};s.forEach(d=>U[d.id]=d.data({serverTimestamps:'estimate'}))}catch(e){toast('Не удалось загрузить пользователей: проверьте правила Firestore')}}
@@ -305,7 +306,7 @@ function renderList(){
   const q=$('search').value.trim().toLowerCase();
   const others=Object.keys(U).filter(k=>k!==me&&nameOf(k).toLowerCase().includes(q));
   const dm=k=>chats['dm_'+[me,k].sort().join('_')];
-  others.sort((a,b)=>ts(dm(b)?.last?.t)-ts(dm(a)?.last?.t)||nameOf(a).localeCompare(nameOf(b)));
+  others.sort((a,b)=>{if(q){const pa=nameOf(a).toLowerCase().startsWith(q)?0:1,pb=nameOf(b).toLowerCase().startsWith(q)?0:1;if(pa!==pb)return pa-pb}return ts(dm(b)?.last?.t)-ts(dm(a)?.last?.t)||nameOf(a).localeCompare(nameOf(b))});
   const items=[{id:'general',name:'Общий чат',c:chats.general},...others.map(k=>({id:k,name:dn(k),c:dm(k)}))];
   const L=$('list');L.innerHTML='';
   items.forEach(it=>{
@@ -315,13 +316,17 @@ function renderList(){
     b.innerHTML='<div class="ava"></div><div class="meta"><div class="row"><span class="n"></span><span class="tm"></span></div><div class="row"><span class="l"></span><span class="badge hidden">новое</span></div></div>';
     const a=b.querySelector('.ava');
     if(it.id==='general'){a.textContent='#';a.style.background='#7cb7ff'}else ava(a,it.id,isOn(it.id));
-    b.querySelector('.n').textContent=it.name;
+    hl(b.querySelector('.n'),it.name,q);
     b.querySelector('.tm').textContent=last?fmtT(ts(last.t)):'';
     b.querySelector('.l').textContent=last?(last.from===me?'Вы: ':'')+last.text:(it.id==='general'?'Пишут все':'Напишите первым');
     if(un)b.querySelector('.badge').classList.remove('hidden');
     b.onclick=()=>{openChat(it.id);$('app').classList.add('open');$('txt').focus()};
     L.appendChild(b);
   });
+  if(q){
+    if(!L.children.length){const e=document.createElement('div');e.className='empty';e.style.padding='20px';e.textContent='Никого не нашли по запросу «'+q+'»';L.appendChild(e)}
+    else{const h=document.createElement('div');h.className='l';h.style.padding='4px 14px';h.textContent='Найдено: '+L.children.length;L.prepend(h)}
+  }
 }
 function renderHead(){
   if(!me)return;const h=$('hAva');
@@ -408,8 +413,10 @@ $('file').onchange=e=>{
 '😀 😂 🥹 😍 😎 🤔 😭 😡 👍 👎 👏 🙏 🔥 ❤️ 💔 🎉 ✨ 🚀 💯 👀 🤝 😴 🤯 😅'.split(' ').forEach(x=>{const b=document.createElement('button');b.type='button';b.textContent=x;b.onclick=()=>{const t=$('txt');t.setRangeText(x,t.selectionStart,t.selectionEnd,'end');t.focus();autoH()};$('emo').appendChild(b)});
 $('emoBtn').onclick=e=>{e.stopPropagation();$('emo').classList.toggle('hidden')};
 document.addEventListener('click',e=>{if(!$('emo').contains(e.target))$('emo').classList.add('hidden')});
-$('search').oninput=renderList;
-$('search').onfocus=()=>fetchUsers().then(renderList);
+let lastFetch=0;
+function refreshUsers(){if(Date.now()-lastFetch<15000)return;lastFetch=Date.now();fetchUsers().then(renderList)}
+$('search').oninput=()=>{renderList();refreshUsers()};
+$('search').onfocus=refreshUsers;
 $('back').onclick=()=>$('app').classList.remove('open');
 document.addEventListener('visibilitychange',()=>{if(!document.hidden&&me){updateDoc(doc(db,'users',me),{seen:serverTimestamp()}).catch(()=>{});markRead(cur);renderList()}});
 
@@ -423,7 +430,7 @@ function drawSettings(){
 function openSettings(){
   drawSettings();
   let a=$('modBtn');
-  if(!a){a=document.createElement('button');a.id='modBtn';a.type='button';a.className='ghost';a.style.cssText='margin-top:14px;margin-right:8px';a.textContent='🛡 Модерация';a.onclick=()=>{$('dlg').close();openMod()};$('dlg').insertBefore(a,$('close'))}
+  if(!a){a=document.createElement('button');a.id='modBtn';a.type='button';a.className='ghost';a.style.cssText='margin-top:14px;margin-right:8px';a.textContent='🛡 Все аккаунты и модерация';a.onclick=()=>{$('dlg').close();openMod()};$('dlg').insertBefore(a,$('close'))}
   a.classList.toggle('hidden',!isAdm);
   $('dlg').showModal();
 }
@@ -541,19 +548,32 @@ function sanText(s){
   if(m>Date.now())p.push(m>4e12?'🔇 мут навсегда':'🔇 мут до '+whenFmt(m));
   return p.join(' · ')||'активен';
 }
+function hl(el,text,q){
+  el.textContent='';
+  const i=q?text.toLowerCase().indexOf(q):-1;
+  if(i<0){el.textContent=text;return}
+  el.append(text.slice(0,i));
+  const m=document.createElement('mark');m.textContent=text.slice(i,i+q.length);el.append(m);
+  el.append(text.slice(i+q.length));
+}
+function adminUI(){
+  let b=$('admBtn');
+  if(!isAdm){if(b)b.remove();return}
+  if(!b){b=document.createElement('button');b.id='admBtn';b.type='button';b.className='ghost';b.title='Все аккаунты и модерация';b.setAttribute('aria-label','Все аккаунты и модерация');b.textContent='🛡';b.onclick=()=>openMod();$('setBtn').after(b)}
+}
 function ensureMod(){
   if($('mod'))return;
-  const d=document.createElement('dialog');d.id='mod';
-  d.innerHTML='<h2>Модерация</h2><p class="sub" style="margin:0 0 10px">Бан, мут и удаление чужих сообщений доступны только создателю.</p><input id="modS" type="text" placeholder="Найти пользователя"><div id="modL" style="margin-top:10px;max-height:50vh;overflow:auto"></div><button class="btn" id="modX" type="button">Закрыть</button>';
+  const d=document.createElement('dialog');d.id='mod';d.style.width='min(640px,94vw)';
+  d.innerHTML='<h2>Все аккаунты</h2><p class="sub" id="modN" style="margin:0 0 10px"></p><div style="display:flex;gap:8px"><input id="modS" type="text" placeholder="Найти по нику"><select id="modO" aria-label="Сортировка" style="width:auto"><option value="new">Сначала новые</option><option value="old">Сначала старые</option><option value="seen">Недавно в сети</option><option value="az">По алфавиту</option></select></div><div id="modL" style="margin-top:10px;max-height:55vh;overflow:auto"></div><button class="btn" id="modX" type="button">Закрыть</button>';
   document.body.appendChild(d);
-  $('modX').onclick=()=>d.close();$('modS').oninput=drawMod;
+  $('modX').onclick=()=>d.close();$('modS').oninput=drawMod;$('modO').onchange=drawMod;
 }
 async function openMod(uid){
   if(!isAdm)return;
   ensureMod();
   try{const sn=await getDocs(collection(db,'sanctions'));SAN={};sn.forEach(x=>SAN[x.id]=x.data({serverTimestamps:'estimate'}))}
-  catch(e){toast('Не удалось загрузить список. Проверьте правила Firestore')}
-  await fetchUsers();
+  catch(e){toast('Не удалось загрузить список наказаний. Проверьте правила Firestore')}
+  await fetchUsers();lastFetch=Date.now();
   $('modS').value=uid?nameOf(uid):'';drawMod();
   if(!$('mod').open)$('mod').showModal();
 }
@@ -564,21 +584,32 @@ async function setSan(k,patch){
   }catch(e){toast('Не удалось: '+(e.code||e.message))}
 }
 function drawMod(){
-  const q=$('modS').value.trim().toLowerCase(),L=$('modL');L.innerHTML='';
-  const ids=Object.keys(U).filter(k=>k!==me&&nameOf(k).toLowerCase().includes(q)).sort((a,b)=>nameOf(a).localeCompare(nameOf(b)));
+  const q=$('modS').value.trim().toLowerCase(),L=$('modL'),o=$('modO').value,all=Object.keys(U);
+  const ids=all.filter(k=>nameOf(k).toLowerCase().includes(q));
+  ids.sort({new:(a,b)=>ts(U[b].created)-ts(U[a].created),old:(a,b)=>ts(U[a].created)-ts(U[b].created),seen:(a,b)=>ts(U[b].seen)-ts(U[a].seen),az:(a,b)=>nameOf(a).localeCompare(nameOf(b))}[o]);
+  const nb=all.filter(k=>SAN[k]&&SAN[k].banned).length;
+  $('modN').textContent='Всего аккаунтов: '+all.length+(q?' · найдено: '+ids.length:'')+(nb?' · заблокировано: '+nb:'');
+  L.innerHTML='';
   if(!ids.length)L.innerHTML='<div class="sub">Никого не найдено</div>';
+  const dt=x=>ts(x)?whenFmt(ts(x)):'—';
   ids.forEach(k=>{
     const s=SAN[k]||{},mu=ts(s.mutedUntil)>Date.now(),row=document.createElement('div');
-    row.style.cssText='display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px 0;border-bottom:1px solid var(--line)';
-    row.innerHTML='<div class="ava"></div><div style="flex:1;min-width:120px"><b class="n"></b><div class="l"></div></div><select aria-label="Срок мута" style="width:auto;padding:6px"><option value="900000">15 мин</option><option value="3600000">1 час</option><option value="86400000">1 день</option><option value="perm">навсегда</option></select><button class="ghost mu" type="button"></button><button class="ghost bn" type="button"></button>';
-    ava(row.querySelector('.ava'),k);
-    row.querySelector('.n').textContent=dn(k);row.querySelector('.l').textContent=sanText(s);
-    const sel=row.querySelector('select'),mb=row.querySelector('.mu'),bb=row.querySelector('.bn');
+    row.style.cssText='display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:9px 0;border-bottom:1px solid var(--line)';
+    row.innerHTML='<div class="ava"></div><div style="flex:1;min-width:150px"><b class="n"></b><div class="l" style="white-space:normal"></div><div class="l st" style="white-space:normal"></div></div>';
+    ava(row.querySelector('.ava'),k,isOn(k));
+    hl(row.querySelector('.n'),dn(k),q);
+    row.querySelector('.l').textContent='создан '+dt(U[k].created)+' · '+(isOn(k)?'в сети':'был(а) в сети '+dt(U[k].seen));
+    const st=row.querySelector('.st'),t=sanText(s);
+    if(t!=='активен')st.textContent=t;else st.remove();
+    if(k===me){const y=document.createElement('span');y.className='l';y.textContent='это вы';row.appendChild(y);L.appendChild(row);return}
+    const sel=document.createElement('select');sel.setAttribute('aria-label','Срок мута');sel.style.cssText='width:auto;padding:6px';
+    [['900000','15 мин'],['3600000','1 час'],['86400000','1 день'],['perm','навсегда']].forEach(([v,t2])=>{const op=document.createElement('option');op.value=v;op.textContent=t2;sel.appendChild(op)});
     sel.classList.toggle('hidden',mu);
-    mb.textContent=mu?'Размутить':'Замутить';bb.textContent=s.banned?'Разбанить':'Забанить';
+    const mb=document.createElement('button');mb.type='button';mb.className='ghost';mb.textContent=mu?'Размутить':'Замутить';
+    const bb=document.createElement('button');bb.type='button';bb.className='ghost';bb.textContent=s.banned?'Разбанить':'Забанить';
     mb.onclick=()=>setSan(k,{mutedUntil:mu?null:new Date(sel.value==='perm'?'2100-01-01':Date.now()+Number(sel.value))});
     bb.onclick=()=>{if(s.banned||confirm('Забанить '+nameOf(k)+'?'))setSan(k,{banned:!s.banned})};
-    L.appendChild(row);
+    row.append(sel,mb,bb);L.appendChild(row);
   });
 }
 </script>
